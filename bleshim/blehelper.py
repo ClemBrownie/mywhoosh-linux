@@ -139,7 +139,28 @@ class Bluez:
         return self.om.GetManagedObjects()
 
     def device_path(self, addr):
-        return "%s/dev_%s" % (self.adapter_path, addr.upper().replace(":", "_"))
+        """Path of the device whose address is `addr`, by any name it carries.
+
+        Addresses in the protocol are what a client was shown: usually the
+        BlueZ object-path name (`dev_61_C4...`), but after a bond BlueZ
+        re-keys the record to the peripheral's identity address -- an
+        iPhone's `Address` reads E8:5F... while the object keeps the RPA
+        path it was discovered under.  The naming rule is tried first (the
+        common case costs nothing extra); only when it misses do we crawl
+        the tree for the property match, so a remembered identity address
+        keeps connecting across key rotations.
+        """
+        direct = "%s/dev_%s" % (self.adapter_path, addr.upper().replace(":", "_"))
+        if direct in self.objects():
+            return direct
+        want = addr.upper()
+        for path, ifaces in sorted(self.objects().items()):
+            if not path.startswith(self.adapter_path + "/dev_"):
+                continue
+            d = ifaces.get(DEVICE_IFACE)
+            if d and str(d.get("Address", "")).upper() == want:
+                return path
+        return direct
 
     def device_props(self, addr):
         return self.objects().get(self.device_path(addr), {}).get(DEVICE_IFACE, {})
@@ -278,13 +299,20 @@ class Bluez:
         # The GATT tree takes a moment once the link is up; BlueZ flips
         # ServicesResolved when it is complete.  Polling on this thread's own
         # connection is cheap and free of any main-loop dependency.
+        # iOS's bond records can leave ServicesResolved stuck false while the
+        # tree is fully present (a link that lived through our own helper
+        # restarts, say) -- the tree being there is the truth worth trusting.
         end = time.monotonic() + CONNECT_TIMEOUT
+        prefix = path + "/"
         while True:
             try:
                 if props.Get(DEVICE_IFACE, "ServicesResolved"):
                     break
             except dbus.DBusException:
                 raise BleError("%s went away while resolving its services" % addr)
+            if any(p.startswith(prefix) and SERVICE_IFACE in ifaces
+                   for p, ifaces in self.objects().items()):
+                break
             if time.monotonic() >= end:
                 raise BleError("connected to %s but its services never resolved" % addr)
             time.sleep(0.3)
@@ -630,9 +658,15 @@ class Server:
                 self.work.get_nowait()
         except queue.Empty:
             pass
+        # The gates (subscribed/char_addr) stay put: the usual way this runs
+        # is the helper being swapped, with the same shim reconnecting a few
+        # seconds later -- a game mid-ride never re-asks for a CCCD it
+        # believes is active, so its values must not be gated off.  The next
+        # helper START re-derives these maps from BlueZ's Notifying flags
+        # (restore_notifications), which keeps them from drifting stale; the
+        # only case left unpicked-up is "game gone forever", where the
+        # notifications idle harmlessly against a socket nobody reads.
         with self.meta_lock:
-            self.subscribed.clear()
-            self.char_addr.clear()
             self.silent.clear()
         self.stop_scan()
 
@@ -994,6 +1028,55 @@ class Server:
             log("notify state restored for %d characteristic(s): %s",
                 len(restored), ", ".join(restored))
 
+    def notif_state_loop(self):
+        """Periodically re-arm subscriptions BlueZ let fall over.
+
+        Protocol-wise a subscription has three keepers: the game's belief,
+        the helper's gate and the CCCD on BlueZ's side.  Helper hand-offs,
+        suspend races or a bluetoothd hiccup can tear one while the others
+        stand; a game that believes itself subscribed never re-asks, so the
+        movement must come from here: a Notifying seen false while the link
+        is up gets the same StartNotify the game's subscribe would have
+        issued.  Nothing is triggered while everything agrees -- the pass
+        only ever logs when it actually re-arms something.
+        """
+        time.sleep(12)              # let whatever connects connect first
+        while True:
+            try:
+                self.heal_notifications()
+            except Exception as e:  # noqa: BLE001 -- the watcher survives all
+                log("self-heal pass failed: %r", e)
+            time.sleep(10)
+
+    def heal_notifications(self):
+        with self.meta_lock:
+            pairs = list(self.subscribed)
+        if not pairs:
+            return
+        objs = self.main_bluez.objects()
+        for addr, uuid in pairs:
+            try:
+                path = self.main_bluez.char_path(addr, uuid)
+            except (BleError, IndexError):
+                continue
+            ch = objs.get(path, {}).get(CHAR_IFACE)
+            if not ch:
+                continue
+            with self.meta_lock:
+                if path not in self.char_addr:
+                    self.char_addr[path] = (addr, uuid)
+            device_path = self.main_bluez.device_path(addr)
+            d = objs.get(device_path, {}).get(DEVICE_IFACE)
+            if not d or not d.get("Connected"):
+                continue
+            if ch.get("Notifying"):
+                continue
+            try:
+                self.main_bluez.notify(addr, uuid, True)
+                log("self-heal: re-armed %s %s", addr, uuid)
+            except (BleError, dbus.DBusException) as e:
+                log("self-heal: StartNotify(%s, %s) failed: %s", addr, uuid, e)
+
     def announce_known(self):
         """Report the devices already on the air when a scan starts.
 
@@ -1298,6 +1381,8 @@ def main():
     # started after the loop thread has its own bus in place.
     threading.Thread(target=server.worker_loop,
                      name="blehelper-worker", daemon=True).start()
+    threading.Thread(target=server.notif_state_loop,
+                     name="blehelper-selfheal", daemon=True).start()
 
     try:
         GLib.MainLoop().run()
