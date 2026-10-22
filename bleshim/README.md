@@ -124,7 +124,7 @@ And one thing the prefix must **not** have:
 
   A fresh prefix has no such service. One that has had Apple's Bonjour or
   iTunes installed into it does. `./install.sh --verify` says which state a
-  prefix is in; `CLAUDE.md` has the IL.
+  prefix is in; `ENGINEERING.md` has the IL.
 
 ## When it does not work
 
@@ -170,10 +170,10 @@ mono build/TestBle.exe AA:BB:CC:DD:EE:FF --control    # ... and take FTMS contro
 ```
 
 Run it under wine-mono as well as the host's Mono — the two runtimes disagree
-about details that only bite inside the prefix. `CLAUDE.md` explains which.
+about details that only bite inside the prefix. `ENGINEERING.md` explains which.
 
 ## Going deeper
 
-`CLAUDE.md` in this directory is the engineering reference: what the game's own
+`ENGINEERING.md` in this directory is the engineering reference: what the game's own
 IL requires, the traps in wine-mono that cost the most time, why the design is
 shaped this way, and what is still open.

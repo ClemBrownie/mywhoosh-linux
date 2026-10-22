@@ -6,7 +6,7 @@
 // already enumerates GATT services and characteristics, and when it grows
 // characteristic writes, notifications and advertisement scanning this file is
 // the only one that has to be rewritten to use it.  Today it cannot -- see
-// ../CLAUDE.md for which parts of that stack are still missing.
+// ../ENGINEERING.md for which parts of that stack are still missing.
 //
 // Why a helper process at all.  BlueZ is reached over D-Bus, D-Bus is a unix
 // socket, and Wine's winsock has no AF_UNIX: the constant is in winsock.h and

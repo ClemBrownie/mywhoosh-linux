@@ -107,5 +107,5 @@ on the second line, the missing ones show pointers on the HUD again.
 | `build.sh` | `mcs` → `build/MyWhooshShim.dll` |
 | `install.sh` | Copies it into the prefix's wine-mono tree (`--restore` removes it) |
 
-`CLAUDE.md` has the engineering notes: why the runtime cannot be talked into
+`ENGINEERING.md` has the engineering notes: why the runtime cannot be talked into
 doing this itself, and who owns the memory.

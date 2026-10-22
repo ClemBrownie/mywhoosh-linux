@@ -103,7 +103,7 @@ class Signatures:
     Mixed into the metadata reader.  Types are named the way the *declaring*
     metadata names them, with no assembly qualifier: the BCL splits types
     across different assemblies on wine-mono than on the host (see
-    ../bleshim/CLAUDE.md), and an assembly-qualified comparison would report
+    ../bleshim/ENGINEERING.md), and an assembly-qualified comparison would report
     that split as a mismatch.  A name-and-shape comparison is what the runtime
     itself does when it binds a MemberRef.
     """

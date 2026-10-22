@@ -107,5 +107,5 @@ they change.
 | [`patch/`](patch/README.md) | An older, launch-only approach, kept for reference |
 | `dist.sh` | Builds and publishes the release the installers download |
 
-Contributions are welcome. [`CLAUDE.md`](CLAUDE.md) is the map for anyone
+Contributions are welcome. [`CONTRIBUTING.md`](CONTRIBUTING.md) is the map for anyone
 working on the code.
