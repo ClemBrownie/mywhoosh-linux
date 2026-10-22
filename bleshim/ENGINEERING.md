@@ -132,10 +132,24 @@ the BLE path — down.
 
 ## Two rules inside the shim
 
-**Every `IAsyncOperation` completes inline.** `BluetoothProgram::IsBluetoothEnabled`
-awaits and then `Task.Wait()`s on the same thread; anything that actually defers
-deadlocks the game at startup. `src/Windows.cs` wraps `Task.FromResult` — the
-work has already happened by the time the operation is handed back.
+**Only the radios operation completes inline.** `BluetoothProgram::IsBluetoothEnabled`
+awaits `GetRadiosAsync` and then `Task.Wait()`s it on the same thread — the
+game's only Bluetooth sync-over-async wait (dozens of `await`s in its IL, one
+`Task::Wait`), asked several times a second through `BT_GetModuleState`. An
+answer that actually defers deadlocks the game at startup. So radios is built
+from a completed value, the helper answers it from an in-memory cache, and
+`Backend` bounds the wait at 2.5 s, falling back to its last snapshot for at
+most 10 s so a helper blip does not flash "Bluetooth off".
+
+**Everything else must not.** Connect, GATT walks, reads, writes and
+subscriptions run inside the game's async-void chains
+(`ExtensionMethods::Await` is built on `AsyncVoidMethodBuilder`). Completed
+inline, they ran the whole BlueZ wait — up to thirty seconds for a connect — on
+whichever thread called them, which was the game's UI thread: that was the
+freeze. They now produce their task with `Backend.Run` (`Task.Factory.StartNew`,
+which wine-mono's BCL has) and end in an explicit failure shape instead of
+letting an exception cross: a null device, `GattCommunicationStatus.Unreachable`,
+or an empty list.
 
 **Events arrive on the shim's dispatcher thread**, which is not a thread the
 game created. This was the risk named before any of it was written and it turns
@@ -154,6 +168,35 @@ Newline-delimited JSON on `127.0.0.1:27019`, one client at a time.
 
 Deliberately dumb and transport-agnostic: the helper can later move in-process,
 or be replaced by Wine's own API, without `src/Windows.cs` noticing.
+
+Inside `blehelper.py`, two threads:
+
+- **Main loop** (GLib). Owns the socket and answers what is instant: radios from
+  an in-memory cache kept fresh by BlueZ signals, scan toggling, advertisements.
+  It is also the only thread that writes to the client, draining an outbox the
+  worker fills.
+- **Worker.** Runs the ops that can block on hardware — `connect`, `disconnect`,
+  `services`, `chars`, `read`, `write`, `notify` — one at a time, in arrival
+  order, inside a catch-all so one bad request cannot strand the rest. Before
+  this split, one `Device1.Connect()` stalled radio polls, scans and
+  notifications for its whole duration.
+
+Both threads use the same `dbus.SystemBus()` connection (dbus-python shares
+it). That is also what lets either thread stop a discovery the other started:
+BlueZ ties a discovery to the D-Bus client that began it. Whether one is running
+is a single flag, `Server.scanning`, behind a lock; the `Bluez` methods keep no
+scan state of their own.
+
+**Retries rest.** The game retries a failed device every 5 s for as long as
+Bluetooth is on (`BluetoothSensor::DidFailToCreateBluetoothDevice`:
+`Task::Delay(5000)` then `Connect` again). Each retry cost BlueZ a full connect
+attempt and could raise a pairing prompt on a phone. So a failed connect makes
+its address rest 10 s, then 20, 40, up to 120; a success or a disconnect clears
+it. The main loop refuses a resting address before it reaches the worker.
+
+`fakehelper.py` speaks the same protocol over two virtual sensors, with per-op
+`--slow`/`--fail` injection; `TestBle.cs` drives the shim against it.
+BlueZ's real timing is only visible with hardware.
 
 ## The Bonjour gate
 

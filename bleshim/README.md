@@ -80,7 +80,9 @@ to BlueZ: BlueZ is D-Bus, D-Bus is a Unix socket, and Wine's winsock has no
 `AF_UNIX`. So the hardware half lives outside Wine as a small Python program
 speaking BlueZ's D-Bus API, and the two halves exchange one JSON object per line
 over `127.0.0.1:27019`. `src/Backend.cs` is the only file in the shim that knows
-this; everything above it just calls methods.
+this; everything above it just calls methods. The helper answers quick
+questions at once and runs anything that waits on hardware, like a connect, on a
+separate thread, so a sensor being woken up never holds up the game.
 
 **3. The export shim, `../exportshim/`.** Four of the game's C entry points hand
 their device list back by reference, and wine-mono refuses to marshal that
@@ -195,7 +197,8 @@ python3 -m unittest discover -s bleshim/tests -v
 | `src/Loader.cs` | Starts `../exportshim/` from inside the game |
 | `src/SystemRuntimeWindowsRuntime.cs` | The one member the game needs to `await` a WinRT call |
 | `blehelper.py` | The Linux half: BlueZ over D-Bus, serving one client on loopback |
-| `TestBle.cs` | Drives the shim the way the game does, without the game |
+| `fakehelper.py` | A protocol-identical helper over two virtual sensors, with per-op `--slow`/`--fail` injection — the regression substrate |
+| `TestBle.cs` | Drives the shim the way the game does, without the game, plus the automated scenarios (`--stub`, `--stub --slow-radios`, `--quiescence`, `--thin`) |
 | `build.sh` / `install.sh` / `run.sh` | Build, install into a prefix, launch |
 
 `install.sh --verify` says what is currently in a prefix; `--restore` puts the
@@ -212,7 +215,14 @@ mono build/TestBle.exe AA:BB:CC:DD:EE:FF              # connect, walk GATT, subs
 mono build/TestBle.exe AA:BB:CC:DD:EE:FF --control    # ... and take FTMS control
 ```
 
-Run it under wine-mono as well as the host's Mono — the two runtimes disagree
+Without any hardware, `./regression.sh` runs the automated scenarios against
+`fakehelper.py` (`--stub`, `--stub --slow-radios`, `--thin`; `--quiescence`
+uses the real helper but no device). `./winetest.sh` runs the `--thin` walk under
+the prefix's wine-mono; it looks for GE-Proton, so point `GE=` at another wine
+(for example `GE=/opt/wine-staging`) if that is what Lutris uses. Both exit 0
+only if every assertion held.
+
+Run them under wine-mono as well as the host's Mono — the two runtimes disagree
 about details that only bite inside the prefix. `ENGINEERING.md` explains which.
 
 ## Going deeper

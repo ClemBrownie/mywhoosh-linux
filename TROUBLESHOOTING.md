@@ -38,6 +38,7 @@ The previous run is kept beside it as `session.log.prev`.
 | No log, or nothing in it | The helper is not running, or the game has not reached its device screen |
 | `scanning`, but your trainer never appears | It is asleep (step 1), or Linux cannot see it either (step 2) |
 | A phone or watch shows in `bluetoothctl` but not in the game | Normal. The game only lists devices advertising a fitness service |
+| `is being retried too soon` | The sensor failed to connect a moment ago. To avoid waking it over and over, the next try waits a little longer each time, up to two minutes. Wake the sensor and give it that time |
 | The game says Bluetooth is off | The helper is not reachable, or the adapter is off: `bluetoothctl power on` |
 | Lutris is a Flatpak and there is no adapter | The host needs two Python packages; see the Flatpak note in the [README](README.md#before-you-start) |
 | The wrong adapter is used, with more than one | The default is the only powered adapter, or `hci0` if several are. Set `MYWHOOSH_BLE_ADAPTER` (for example `hci1`); see [`lutris/README.md`](lutris/README.md) |

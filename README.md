@@ -85,6 +85,9 @@ most common reason a device does not show up.
 Several sensors at once are fine (a trainer and a heart-rate strap, say); each
 gets its own connection.
 
+Connecting can take up to a minute, longer if the sensor was asleep. The game
+stays usable while it waits.
+
 Still nothing? [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) goes through it step
 by step.
 

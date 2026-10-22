@@ -381,6 +381,14 @@ namespace MyWhoosh
             readonly int esize;
             bool firstCall = true;
 
+            // Change-gated logging.  The pairing screen polls this once or
+            // twice a second, and a line for every poll was a session.log
+            // that grew by the hour for one never-changing fact (issue #10).
+            // Say what changed: a count that moves, and a steady count at
+            // most every minute so silence still proves the poll alive.
+            int lastCount = -1;
+            DateTime lastLoggedAt;
+
             internal Poller(string name, MethodInfo method, Type elem)
             {
                 this.name = name;
@@ -421,7 +429,8 @@ namespace MyWhoosh
                 // Mirror the CLR's out-direction: a fresh CoTaskMemAlloc block,
                 // its address stored through the pointer, the count returned.
                 // Never null, so a caller that dereferences before checking the
-                // count reads zeroed memory instead of faulting.
+                // count reads zeroed memory instead of faulting.  Fresh every
+                // call, never reused: ENGINEERING.md, "Who owns the memory".
                 int bytes = esize * Math.Max(count, 1);
                 IntPtr block = Marshal.AllocCoTaskMem(bytes);
                 for (int i = 0; i < bytes; i++) Marshal.WriteByte(block, i, 0);
@@ -430,7 +439,15 @@ namespace MyWhoosh
                                            new IntPtr(block.ToInt64() + (long)i * esize), false);
 
                 if (ppDevices != IntPtr.Zero) Marshal.WriteIntPtr(ppDevices, block);
-                if (count > 0) Log(name + " -> " + count + " device(s) at 0x" + block.ToString("x16"));
+
+                DateTime now = DateTime.UtcNow;
+                if (count != lastCount
+                    || (count > 0 && (now - lastLoggedAt).TotalSeconds > 60))
+                {
+                    Log(name + " -> " + count + " device(s)");
+                    lastCount = count;
+                    lastLoggedAt = now;
+                }
                 return count;
             }
         }

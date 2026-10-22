@@ -55,7 +55,6 @@ class DiscoveryTests(unittest.TestCase):
     def setUp(self):
         self.bluez = helper.Bluez.__new__(helper.Bluez)
         self.bluez.adapter_path = "/org/bluez/hci5"
-        self.bluez.scanning = False
         self.bluez.om = Mock()
         self.bluez.om.GetManagedObjects.return_value = adapter("hci5")
 
@@ -71,7 +70,6 @@ class DiscoveryTests(unittest.TestCase):
         with patch.object(self.bluez, "adapter", return_value=proxy):
             self.bluez.start_scan()
         proxy.StartDiscovery.assert_called_once()
-        self.assertTrue(self.bluez.scanning)
 
     def test_vanished_adapter_returns_protocol_error(self):
         self.bluez.om.GetManagedObjects.return_value = {}
@@ -82,7 +80,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(response["id"], 7)
         self.assertFalse(response["ok"])
         self.assertIn("disappeared", response["error"])
-        self.assertFalse(self.bluez.scanning)
+        self.assertFalse(server.scanning)
 
     def test_reset_during_filter_returns_error_without_starting_scan(self):
         proxy = Mock()
@@ -94,29 +92,42 @@ class DiscoveryTests(unittest.TestCase):
         with patch.object(self.bluez, "adapter", return_value=proxy):
             server.handle(b'{"id":8,"op":"scan","enable":true}')
         self.assertFalse(server.send.call_args.args[0]["ok"])
-        self.assertFalse(self.bluez.scanning)
+        self.assertFalse(server.scanning)
 
     def test_adapter_removal_clears_stale_session_state(self):
-        self.bluez.scanning = True
         server = helper.Server(self.bluez, 0)
+        server.scanning = True
         server.send = Mock()
         server.connected["02:00:00:00:00:01"] = True
         server.subscribed.add(("02:00:00:00:00:01", "test"))
         server.char_addr["/test"] = ("02:00:00:00:00:01", "test")
         server.on_interfaces_removed("/org/bluez/hci5", [helper.ADAPTER_IFACE])
-        self.assertFalse(self.bluez.scanning)
+        server.drain_outbox()
+        self.assertFalse(server.scanning)
         self.assertFalse(server.connected)
         self.assertFalse(server.subscribed)
         self.assertFalse(server.char_addr)
         server.send.assert_called_once_with({"ev": "connection", "addr": "02:00:00:00:00:01", "connected": False})
         server.on_interfaces_removed("/org/bluez/hci5", [helper.ADAPTER_IFACE])
+        server.drain_outbox()
         self.assertEqual(server.send.call_count, 1)
 
+    def test_scan_started_by_worker_is_stopped_by_main_loop(self):
+        worker = helper.Bluez.__new__(helper.Bluez)
+        worker.adapter_path = self.bluez.adapter_path
+        worker.om = self.bluez.om
+        proxy = Mock()
+        server = helper.Server(self.bluez, 0)
+        with patch.object(worker, "adapter", return_value=proxy), \
+             patch.object(self.bluez, "adapter", return_value=proxy):
+            server.request_scan(True, worker)
+            server.stop_scan()
+        proxy.StopDiscovery.assert_called_once()
+        self.assertFalse(server.scanning)
+
     def test_stop_after_adapter_disappears_is_safe(self):
-        self.bluez.scanning = True
         self.bluez.om.GetManagedObjects.return_value = {}
         self.bluez.stop_scan()
-        self.assertFalse(self.bluez.scanning)
 
     def test_list_preserves_observations_before_stop(self):
         def objects():
