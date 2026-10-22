@@ -720,9 +720,10 @@ class Server:
             rest = self.quiescence.remaining(addr)
             if rest > 0:
                 trace("connect %s deferred; quiescence %.0fs remaining", addr, rest)
+                # No countdown in the message: the shim logs it, and a line
+                # that changes every retry would never be suppressed as a repeat.
                 self.post({"id": rid, "ok": False,
-                           "error": "%s is being retried too soon (rest %ds)"
-                                    % (addr, int(rest))})
+                           "error": "%s is being retried too soon" % addr})
                 return
 
         # Potentially slow: services, characters, reads, writes, and above all
