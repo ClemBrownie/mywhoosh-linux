@@ -194,7 +194,7 @@ Inside `blehelper.py` the threads are the whole point:
 
 `fakehelper.py` mirrors the protocol over an in-memory two-device model with
 per-op `--slow`/`--fail` injection, and `TestBle.cs` documents the automated
-scenario that exercise it. The helpers are the test substrate; BlueZ's own
+scenarios that exercise it. The helpers are the test substrate; BlueZ's own
 reaction time is only visible against real hardware.
 
 ## The Bonjour gate

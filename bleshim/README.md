@@ -179,7 +179,7 @@ against `fakehelper.py`: a six-second connect whose caller becomes free in
 milliseconds, radio polls that stay instant the whole time, a radio poll through
 an unresponsive helper cut off at the shim's own 2.5 s bound, and — against the
 real helper — a device that is nowhere failing slowly once and then being
-refused on sight (`--quiescence`). ./winetest.sh runs the shorter walk under
+refused on sight (`--quiescence`).  `./winetest.sh` runs the shorter walk under
 wine-mono, inside the real prefix, where the framework's answers are the ones
 that count. Exit code 0 only if every assertion held.
 
@@ -190,4 +190,7 @@ about details that only bite inside the prefix. `CLAUDE.md` explains which.
 
 `CLAUDE.md` in this directory is the engineering reference: what the game's own
 IL requires, the traps in wine-mono that cost the most time, why the design is
-shaped this way, and what is still open.
+shaped this way, and what is still open.  `../INVESTIGATION-BLE.md` is the
+write-up of how this shape was reached: the freeze chain with the IL each step
+came from, the fixes with their measurements, and the field incidents closed
+along the way.
