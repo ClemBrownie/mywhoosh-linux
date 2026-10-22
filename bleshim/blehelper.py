@@ -319,12 +319,32 @@ class Bluez:
     # same view of the device.
 
     def services(self, addr):
+        """One representative per service UUID, in tree order.
+
+        The game walks every service it is shown and keeps its own map keyed
+        by UUID; a peripheral hosting two instances of one service (the
+        watch's two 180d) handed it the same key twice.  Windows, where this
+        code was written, shows a client one object per service, so answer
+        the same: characteristics() picks its representative with the same
+        score, keeping the two views coherent.
+        """
         prefix = self.device_path(addr) + "/"
-        out = []
+        best = {}
+        for path, ifaces in sorted(self.objects().items(), reverse=True):
+            svc = ifaces.get(SERVICE_IFACE)
+            if svc and path.startswith(prefix):
+                uuid = str(svc["UUID"]).lower()
+                score = self.instance_score(path)
+                if uuid not in best or score > best[uuid]:
+                    best[uuid] = score
+        out, shown = [], set()
         for path, ifaces in sorted(self.objects().items()):
             svc = ifaces.get(SERVICE_IFACE)
             if svc and path.startswith(prefix):
-                out.append({"uuid": str(svc["UUID"]).lower()})
+                uuid = str(svc["UUID"]).lower()
+                if uuid not in shown:
+                    shown.add(uuid)
+                    out.append({"uuid": uuid})
         return out
 
     def service_paths(self, addr, service_uuid):
