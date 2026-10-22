@@ -85,6 +85,7 @@ import time
 
 import dbus
 import dbus.mainloop.glib
+import dbus.service
 from gi.repository import GLib
 
 BLUEZ = "org.bluez"
@@ -1105,6 +1106,91 @@ def list_devices(bluez):
                                          " ".join(u[4:8] for u in uuids) or "no service UUIDs"))
 
 
+# ------------------------------------------------------------------ agent
+AGENT_IFACE = "org.bluez.Agent1"
+AGENT_MANAGER = "org.bluez.AgentManager1"
+AGENT_PATH = "/org/bluez/blehelper/agent"
+
+
+class PairingAgent(dbus.service.Object):
+    """org.bluez.Agent1 answering the SMP exchanges BlueZ cannot sit through.
+
+    The sensors that stream heart rate over an encrypted characteristic make
+    the link demand pairing the moment the game writes the CCCD.  BlueZ then
+    looks for an agent to carry the exchange; with none registered on this
+    desktop the SMP stalls, the peripheral drops the link, and the game's
+    subscribe dies with NotConnected.  This agent carries it instead: passkeys
+    and confirmations are logged verbatim (so the code shown on the phone can
+    be compared) while the machine-side answer is always accept -- a trainer
+    or a watch bridge is not a MITM target worth a full pairing every cycle.
+    """
+
+    def __init__(self, bus):
+        dbus.service.Object.__init__(self, bus, AGENT_PATH)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
+    def Release(self):
+        log("agent: released by BlueZ")
+
+    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="s")
+    def RequestPinCode(self, device):
+        log("agent: RequestPinCode %s -> 000000", device)
+        return "000000"
+
+    @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
+    def DisplayPinCode(self, device, pin):
+        log("agent: DisplayPinCode %s %s", device, pin)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="u")
+    def RequestPasskey(self, device):
+        log("agent: RequestPasskey %s -> replying 0 (no keyboard here)", device)
+        return dbus.UInt32(0)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="ouu", out_signature="")
+    def DisplayPasskey(self, device, passkey, entered):
+        log("agent: ★ passkey for %s: %06d", device, passkey)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="ou", out_signature="")
+    def RequestConfirmation(self, device, passkey):
+        # The phone shows the same six digits and waits for its user; our side
+        # confirms on its own so the exchange never waits on the console.
+        log("agent: ★★ pairing asked for %s, code %06d -- accepted", device, passkey)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="")
+    def RequestAuthorization(self, device):
+        log("agent: RequestAuthorization %s -> accepted", device)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
+    def AuthorizeService(self, device, uuid):
+        log("agent: AuthorizeService %s %s -> accepted", device, uuid)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
+    def Cancel(self):
+        log("agent: exchange cancelled by BlueZ")
+
+
+def register_pairing_agent(bus):
+    """Register with AgentManager1; failure is logged and non-fatal.
+
+    A desktop running another agent keeps its own: both registries can hold
+    agents, BlueZ simply picks one -- ours exists so bluetoothd always finds
+    somebody, which is the whole job.
+    """
+    try:
+        agent = PairingAgent(bus)
+        manager = dbus.Interface(bus.get_object("org.bluez", "/org/bluez"),
+                                 AGENT_MANAGER)
+        manager.RegisterAgent(AGENT_PATH, "DisplayYesNo")
+        manager.RequestDefaultAgent(AGENT_PATH)
+        log("agent: registered at %s (DisplayYesNo, machine side auto-accepts; "
+            "passkeys are logged here)", AGENT_PATH)
+        return agent
+    except dbus.DBusException as e:
+        log("agent: unavailable (%s) -- encrypted characteristics on the phone "
+            "side will keep dropping the link", e.get_dbus_message())
+        return None
+
+
 def main():
     global verbose
     ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
@@ -1124,6 +1210,8 @@ def main():
         raise SystemExit("cannot talk to BlueZ (%s) -- is bluetoothd running?" % e.get_dbus_name())
     if bluez.adapter_path not in bluez.objects():
         raise SystemExit("no adapter at %s -- try --adapter" % bluez.adapter_path)
+
+    register_pairing_agent(bus)
 
     if args.list:
         list_devices(bluez)
