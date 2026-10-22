@@ -27,6 +27,7 @@ using System.IO;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace MyWhoosh.Ble
 {
@@ -47,11 +48,29 @@ namespace MyWhoosh.Ble
     {
         public const int DefaultPort = 27019;
 
-        // Long enough for a sleeping trainer to be woken and connected (the
-        // helper waits for an advertisement rather than blocking in Connect(),
-        // and that wait is bounded on its side), short enough that a helper
-        // that died does not hang the game's UI thread forever.
+        // Three budgets, because the calls have three different jobs now.
+        //
+        // InlineTimeoutMs -- the radio-state poll the game asks from its UI
+        // thread several times a second (BluetoothProgram::IsBluetoothEnabled
+        // Task.Wait()s on it -- see the IL notes in ../CLAUDE.md).  That call
+        // must leave the calling thread in milliseconds, and the helper
+        // answers it from an in-memory cache, so this bound is almost never
+        // exercised; when it is (a helper just died), the caller answers from
+        // Backend's last radios snapshot instead of hanging the UI.
+        //
+        // CallTimeoutMs -- everything the game awaits as a WinRT
+        // IAsyncOperation now runs its wait on a thread-pool thread
+        // (Backend.Run), so this budget can be generous without any UI cost.
+        //
+        // ConnectTimeoutMs -- the one operation whose helper-side work is
+        // genuinely slow: a device that has to be woken first (the helper
+        // waits up to its own 20 s for an advertisement) plus BlueZ's own
+        // ~30 s link timeout plus GATT resolution.  Only compares against the
+        // helper's own budget so the shim never just disappears on the game.
+        const int InlineTimeoutMs = 2500;
         const int CallTimeoutMs = 40000;
+        public const int ConnectTimeoutMs = 75000;
+        public const int InlineScanTimeoutMs = 5000;
 
         static readonly object Gate = new object();
         static TcpClient client;
@@ -166,10 +185,20 @@ namespace MyWhoosh.Ble
 
         // ------------------------------------------------------------ calls
 
-        /// Send one request and wait for its reply.  Returns null when the
-        /// helper is absent, timed out or answered with an error -- the callers
-        /// are WinRT methods that must never throw into the game.
+        /// Send one request and wait for its reply, with ConnectTimeoutMs for
+        /// the slow connect family.  Returns null when the helper is absent,
+        /// timed out or answered with an error -- the callers are WinRT
+        /// methods that must never throw into the game.
         public static Dictionary<string, object> Call(params object[] pairs)
+        {
+            return CallBounded(CallTimeoutMs, pairs);
+        }
+
+        /// The one call the shim is allowed to spend UI time on is the radio
+        /// poll, and that one is answered from the helper's in-memory cache.
+        /// This overload is its explicit, small budget; everything else going
+        /// over the wire should be wrapped in a Backend.Run task instead.
+        public static Dictionary<string, object> CallBounded(int timeoutMs, params object[] pairs)
         {
             if (!Available) return null;
 
@@ -203,10 +232,10 @@ namespace MyWhoosh.Ble
                 return null;
             }
 
-            if (!pending.Done.WaitOne(CallTimeoutMs))
+            if (!pending.Done.WaitOne(timeoutMs))
             {
                 lock (Gate) Waiting.Remove(id);
-                Log("timeout after " + CallTimeoutMs + "ms: " + line);
+                Log("timeout after " + timeoutMs + "ms: " + line);
                 return null;
             }
 
@@ -214,10 +243,56 @@ namespace MyWhoosh.Ble
             if (reply == null) return null;
             if (!Json.Bool(reply, "ok"))
             {
-                Log("helper refused " + line + ": " + Json.Str(reply, "error", "(no reason given)"));
+                Refusal(line, Json.Str(reply, "error", "(no reason given)"));
                 return null;
             }
             return reply;
+        }
+
+        /// Throttled farewell for refusals: the game re-asks an unreached
+        /// device every five seconds, and with the helper's quiescence ladder
+        /// answering those instantly, the same one-line refusal would land in
+        /// the log a dozen times a minute.  Say it when it changes, not on
+        /// every repeat.
+        static string lastRefusal;
+        static DateTime lastRefusalAt;
+
+        static void Refusal(string line, string error)
+        {
+            string key = error;
+            lock (Gate)
+            {
+                if (key == lastRefusal && (DateTime.UtcNow - lastRefusalAt).TotalSeconds < 10) return;
+                lastRefusal = key;
+                lastRefusalAt = DateTime.UtcNow;
+            }
+            Log("helper refused " + line + ": " + error);
+        }
+
+        /// Run a WinRT operation's work on a thread-pool thread.
+        ///
+        /// The game awaits IAsyncOperation results through the awaiter in
+        /// ../src/SystemRuntimeWindowsRuntime.cs, which hands back a Task; a
+        /// Task produced here completes whenever its work finishes, exactly
+        /// the way WinRT operations behave on Windows.  Everything here runs
+        /// far from the calling thread, so a connect that takes half a minute
+        /// delays a continuation, never the window that asked for it.
+        ///
+        /// The fallback matters as much as the work: these tasks complete
+        /// inside the game's async-void chain (ExtensionMethods.Await), where
+        /// an exception would surface as an unhandled one, so every failure
+        /// comes back as a normal, failure-shaped result instead.
+        public static Task<T> Run<T>(Func<T> work, Func<T> fallback)
+        {
+            return Task.Factory.StartNew(delegate
+            {
+                try { return work(); }
+                catch (Exception e)
+                {
+                    Log("async operation failed: " + e.Message);
+                    return fallback();
+                }
+            });
         }
 
         static void ReadLoop(StreamReader r)
@@ -328,20 +403,39 @@ namespace MyWhoosh.Ble
         ///
         /// BlueZ's own Adapter1.Powered cannot be wrong in that way, and the
         /// helper is where BlueZ is reachable.  No helper therefore means no
-        /// radios, which is accurate rather than pessimistic: without it
-        /// nothing in this shim can reach a device even if an adapter is lit.
+        /// radios -- accurate rather than pessimistic, without it nothing in
+        /// this shim can reach a device even if an adapter is lit.
+        ///
+        /// This is the one call that may spend time on the game's UI thread
+        /// (IsBluetoothEnabled Task.Wait()s on it, see the IL notes), which is
+        /// why it runs with InlineTimeoutMs against a helper-side cache that
+        /// answers immediately.  When the helper really is gone or slow, the
+        /// last snapshot is answered instead of nothing: Bluetooth flapping
+        /// "off" for the seconds a stubborn connect takes would make the
+        /// pairing screen flicker and worse, restart device slots.  A snapshot
+        /// is still honest -- it was the truth the moment before.
+        static readonly object RadiosGate = new object();
+        static List<KeyValuePair<string, bool>> lastKnown;
+
         public static List<KeyValuePair<string, bool>> Radios()
         {
             var found = new List<KeyValuePair<string, bool>>();
-            var reply = Call("op", "radios");
-            if (reply == null) return found;
-            foreach (object entry in Json.Arr(reply, "radios"))
+            var reply = CallBounded(InlineTimeoutMs, "op", "radios");
+            if (reply != null)
             {
-                var o = Json.Obj(entry);
-                string name = Json.Str(o, "name");
-                if (name != null) found.Add(new KeyValuePair<string, bool>(name, Json.Bool(o, "powered")));
+                foreach (object entry in Json.Arr(reply, "radios"))
+                {
+                    var o = Json.Obj(entry);
+                    string name = Json.Str(o, "name");
+                    if (name != null) found.Add(new KeyValuePair<string, bool>(name, Json.Bool(o, "powered")));
+                }
+                lock (RadiosGate) lastKnown = new List<KeyValuePair<string, bool>>(found);
+                return found;
             }
-            return found;
+
+            lock (RadiosGate) return lastKnown != null
+                ? new List<KeyValuePair<string, bool>>(lastKnown)
+                : new List<KeyValuePair<string, bool>>();
         }
 
         // -------------------------------------------------------------- log
