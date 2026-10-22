@@ -641,28 +641,34 @@ class Server:
     def drop_client(self):
         """Let go of everything the client had asked for.
 
-        The game going away must not leave a trainer subscribed and a scan
-        running: the next process to use the adapter would inherit both.  Jobs
-        still queued are discarded; the job already running on the worker
-        finishes, and its reply finding no client is send()'s no-op.
+        The game going away must not let a scan run on: the next process to
+        use the adapter would inherit it.  Jobs still queued are discarded;
+        the job already running on the worker finishes, and its reply finding
+        no client is send()'s no-op.
+
+        Notifications, though, are kept: a common way to reach this path is
+        the helper itself being replaced (`deploy.sh` plus a restart), with
+        the same shim reconnecting moments later.  Stopping every CCCD then
+        would freeze the trainer fields for a game that believes itself
+        subscribed and never re-asks.  restore_notifications() rebuilds this
+        process's gates from BlueZ's own Notifying flags on the next start,
+        so the state stays truthful across successors; whoever wants things
+        quiet stops them explicitly (the helper exit path keeps them on for
+        the future instance to pick up, as on exit the choices are all
+        "a new helper" or "a new boot" -- on a new boot BlueZ starts clean).
         """
         if self.client is not None:
             try:
                 self.client.close()
             except OSError:
                 pass
-            self.client = None
+        self.client = None
         self.outbox.clear()
         try:
             while True:
                 self.work.get_nowait()
         except queue.Empty:
             pass
-        for addr, uuid in list(self.lookup_meta("subscribed")):
-            try:
-                self.main_bluez.notify(addr, uuid, False)
-            except (BleError, dbus.DBusException):
-                pass
         with self.meta_lock:
             self.subscribed.clear()
             self.char_addr.clear()
@@ -1008,6 +1014,48 @@ class Server:
                 if d and path.startswith(prefix):
                     self.path_addr[path] = str(d.get("Address", "")).upper()
 
+    def restore_notifications(self):
+        """Rebuild char_addr/subscribed from BlueZ's Notifying flags.
+
+        A helper restart is invisible to the game -- the shim holds its own
+        connection state and never re-asks for a CCCD it believes is active.
+        But the CCCD lives on, on BlueZ's side: a trainer that was streaming
+        keeps streaming into this process, whose gate (`subscribed`) was
+        wiped, so every packet was being dropped before reaching the game.
+        Walking the tree for characteristics BlueZ reports as Notifying puts
+        that state back and the values resume without a device round-trip.
+        """
+        try:
+            objs = self.main_bluez.objects()
+        except dbus.DBusException as e:
+            log("notify restore: %s", e.get_dbus_message())
+            return
+        device_prefixes = sorted(
+            (path for path in objs if "/dev_" in path and DEVICE_IFACE in objs[path]),
+            key=len, reverse=True)
+        restored = []
+        with self.meta_lock:
+            for path, ifaces in objs.items():
+                c = ifaces.get(CHAR_IFACE)
+                if not c or not c.get("Notifying"):
+                    continue
+                owner = next((dev for dev in device_prefixes
+                              if path.startswith(dev + "/")), None)
+                if owner is None:
+                    continue
+                addr = objs[owner][DEVICE_IFACE].get("Address")
+                if not addr:
+                    continue
+                addr = str(addr).upper()
+                uuid = str(c["UUID"]).lower()
+                self.char_addr[path] = (addr, uuid)
+                self.path_addr[owner] = addr
+                self.subscribed.add((addr, uuid))
+                restored.append("%s/%s" % (addr, uuid[:8]))
+        if restored:
+            log("notify state restored for %d characteristic(s): %s",
+                len(restored), ", ".join(restored))
+
     def announce_known(self):
         """Report the devices already on the air when a scan starts.
 
@@ -1066,6 +1114,19 @@ class Server:
                     return
             self.post({"ev": "value", "addr": addr, "char": uuid,
                        "value": bytes(bytearray(changed["Value"])).hex()})
+            # Heart-rate notifications are the one stream worth a trace line:
+            # the trainers' fields repeat several times a second and would
+            # flood the log, so only 2a37 is named, with its decoded BPM.
+            if uuid.startswith("00002a37"):
+                val = bytes(bytearray(changed["Value"]))
+                flags = val[0] if val else 0
+                if len(val) >= 3 and flags & 0x01:
+                    bpm = val[1] | (val[2] << 8)
+                elif len(val) >= 2:
+                    bpm = val[1]
+                else:
+                    bpm = 0
+                trace("value %s 00002a37 = %d bpm (flags 0x%02x)", addr, bpm, flags)
             return
 
         if iface == ADAPTER_IFACE:
@@ -1319,6 +1380,7 @@ def main():
                             signal_name="InterfacesRemoved")
     server.refresh_radios()
     server.remember_paths()
+    server.restore_notifications()
     server.listen()
     # The worker thread that takes every potentially slow BlueZ operation: it
     # builds its own D-Bus connection when it starts, which is why it is
