@@ -584,7 +584,14 @@ class Server:
                 if line:
                     lines.append(line)
         for line in lines:
-            self.handle(line)
+            try:
+                self.handle(line)
+            except Exception as e:                   # noqa: BLE001 -- the reader
+                # must outlive anything one request can do: a request that
+                # has already been read will be timed out by the shim, but a
+                # reader that dies leaves every later request unanswered
+                # while the game waits silently.
+                log("unhandled on %r: %s: %s", line[:80], type(e).__name__, e)
         return True
 
     def send(self, obj):
@@ -707,6 +714,15 @@ class Server:
             except dbus.DBusException as e:
                 log("scan: %s", e.get_dbus_message())
                 self.send({"id": rid, "ok": False, "error": e.get_dbus_message()})
+                return
+            # The main loop owes the shim a reply for every request it reads;
+            # an unexpected exception here must be refused, not absorbed --
+            # a swallowed exception answers nothing, and a game in waiting
+            # sits out its whole timeout (this exact shape is how the
+            # 2026-10-29 freeze opened, via a mis-merged Bluez field).
+            except Exception as e:                   # noqa: BLE001
+                log("scan: unexpected: %s: %s", type(e).__name__, e)
+                self.send({"id": rid, "ok": False, "error": "%s: %s" % (type(e).__name__, e)})
                 return
             self.send({"id": rid, "ok": True})
             return
@@ -1011,6 +1027,8 @@ class Server:
             self.refresh_radios()
             log("Bluetooth adapter %s disappeared; it is used again if it returns under that name, "
                 "otherwise relaunch the game", self.main_bluez.adapter_path.rsplit("/", 1)[-1])
+            return
+        if DEVICE_IFACE not in ifaces:
             return
         if DEVICE_IFACE not in ifaces:
             return
