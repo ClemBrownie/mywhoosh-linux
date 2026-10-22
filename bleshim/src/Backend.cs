@@ -71,6 +71,7 @@ namespace MyWhoosh.Ble
         const int CallTimeoutMs = 40000;
         public const int ConnectTimeoutMs = 75000;
         public const int InlineScanTimeoutMs = 5000;
+        const int LogRepeatWindowMs = 10000;
 
         static readonly object Gate = new object();
         static TcpClient client;
@@ -249,23 +250,13 @@ namespace MyWhoosh.Ble
             return reply;
         }
 
-        /// Throttled farewell for refusals: the game re-asks an unreached
-        /// device every five seconds, and with the helper's quiescence ladder
-        /// answering those instantly, the same one-line refusal would land in
-        /// the log a dozen times a minute.  Say it when it changes, not on
-        /// every repeat.
-        static string lastRefusal;
-        static DateTime lastRefusalAt;
-
+        /// One line for one repeated fact.  The exact throttle lives in Log:
+        /// since the game's polling loops re-ask the same question at a fixed
+        /// cadence, every log-worthy fact in this backend can arrive as a
+        /// stream of identical lines, whether it came from a refusal or from
+        /// something else.
         static void Refusal(string line, string error)
         {
-            string key = error;
-            lock (Gate)
-            {
-                if (key == lastRefusal && (DateTime.UtcNow - lastRefusalAt).TotalSeconds < 10) return;
-                lastRefusal = key;
-                lastRefusalAt = DateTime.UtcNow;
-            }
             Log("helper refused " + line + ": " + error);
         }
 
@@ -442,8 +433,28 @@ namespace MyWhoosh.Ble
 
         static TextWriter log;
 
+        // Several of the game's call paths poll.  The pairing screen asks
+        // IsBluetoothEnabled (the radio poll) several times a second, and
+        // DidFailToCreateBluetoothDevice re-asks an unreachable device every
+        // five seconds -- so a question that never changes would translate
+        // into two log lines a second for as long as its answer stayed the
+        // same, which is exactly what issue #10 filed about a quiet adapter
+        // growing session.log by the hour.  So Log says an identical line at
+        // most once every ten seconds: distinct facts still land on arrival,
+        // a repeating retry or poll costs one line per window, and the log
+        // stays a readable story instead of a metronome.
+        static string lastLoggedLine;
+        static DateTime lastLoggedLineAt;
+
         public static void Log(string msg)
         {
+            lock (Gate)
+            {
+                if (msg == lastLoggedLine && (DateTime.UtcNow - lastLoggedLineAt).TotalMilliseconds < LogRepeatWindowMs)
+                    return;
+                lastLoggedLine = msg;
+                lastLoggedLineAt = DateTime.UtcNow;
+            }
             string line = "[" + DateTime.Now.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture)
                         + " bleshim] " + msg;
             try
