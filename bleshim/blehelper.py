@@ -104,6 +104,7 @@ ADVERT_TIMEOUT = 20           # seconds waiting for a named device to be on the 
 # into the radio every five seconds is what kept waking everything up.
 CONNECT_BACKOFF_BASE = 10     # seconds after the first failure
 CONNECT_BACKOFF_MAX = 120     # seconds between attempts at the ladder's top
+GATT_REBUILD_GAP = 90         # seconds between record lifts for one address
 
 verbose = False
 
@@ -369,6 +370,22 @@ class Bluez:
         except dbus.DBusException as e:
             trace("Disconnect(%s): %s", addr, e.get_dbus_name())
 
+    def lift_record(self, addr):
+        """Drop the BlueZ device record entirely, the documented way to force
+        a GATT re-discovery on the next connect.
+
+        There is no refresh API on Device1, and BlueZ trusts whatever cache
+        it holds: a record whose discovery once came back empty (a phone
+        bridge whose app had closed, say) stays "resolved with nothing" and
+        every later walk sees an empty tree forever.  Removing the record and
+        connecting anew runs discovery from zero and writes a real cache --
+        and it re-pairs on the way, which the pairing agent handles while the
+        phone asks its owner to confirm once.  Real protocol, the only one
+        that is honest about this trap.
+        """
+        self.adapter().RemoveDevice(self.device_path(addr))
+        log("%s: record removed -- the next connect re-pairs and rediscovers", addr)
+
     # ----------------------------------------------------------------- gatt
 
     # Some devices carry two services with the same UUID.  The Apple watch
@@ -627,6 +644,12 @@ class Server:
         # another device's link being built.
         self.work = queue.Queue()
         self.quiescence = Quiescence()
+
+        # One GATT rebuild per address per gap at most: the heal removes a
+        # record and re-pairs, and doing that twice in a row for one tap
+        # would lift a record that is already healthy.
+        self.gatt_heal = {}
+        self.gatt_heal_lock = threading.Lock()
 
     # ------------------------------------------------------------ transport
 
@@ -950,6 +973,56 @@ class Server:
             trace("-> id %s op %s: %s", rid, op, reply_blob[:400])
             self.post(reply)
 
+    def maybe_rebuild_gatt(self, bz, addr):
+        """Empty GATT on a paired device: lift the record, pair again, and
+        give the tree a second life.
+
+        Runs on the worker thread after a `services` came back empty for a
+        device BlueZ still calls paired: BlueZ is then trusting a resolved-
+        but-empty cache and will never discover again on its own (the trap
+        the phone-bridge walked into days after its first pairing - the app
+        had closed when the record was minted, the cache minted empty, and
+        every later walk read `[]`).  The lift makes the next connect run a
+        real discovery and hand out a fresh cache; the pairing agent carries
+        the SMP half, and the phone asks its owner to confirm once.
+
+        This never delays the walk that found the emptiness: the job had
+        already answered its caller honestly before reaching here, and the
+        NEXT walk of this address sees the rebuilt tree.  One rebuild per
+        address per GATT_REBUILD_GAP keeps a sleeping phone from losing its
+        bond in a tap-loop; a rebuild that stopped at "not on the air"
+        leaves the record lifted and a later tap pairs anyway.
+        """
+        with self.gatt_heal_lock:
+            now = time.monotonic()
+            if now - self.gatt_heal.get(addr, 0.0) < GATT_REBUILD_GAP:
+                trace("%s: a GATT rebuild is still resting within the gap", addr)
+                return
+        if not bz.device_props(addr).get("Paired"):
+            return
+        with self.gatt_heal_lock:
+            self.gatt_heal[addr] = time.monotonic()
+        log("%s: paired but its GATT tree reads empty -- lifting the record "
+            "to force a rediscovery", addr)
+        try:
+            bz.lift_record(addr)
+        except dbus.DBusException as e:
+            log("%s: record lift refused (%s); keeping what BlueZ has", addr,
+                e.get_dbus_message())
+            return
+        try:
+            name = bz.connect(addr)
+            count = len(bz.services(addr))
+            if count:
+                log("%s: re-paired as %r, %d service(s) discovered -- "
+                    "a next walk of this sensor serves the tree", addr, name, count)
+            else:
+                log("%s: re-paired as %r but the tree came up empty again -- "
+                    "the bridge side is not serving yet", addr, name)
+        except (BleError, dbus.DBusException) as e:
+            log("%s: no rebuild yet (%s); the record stays lifted, a later "
+                "walk of this sensor re-pairs", addr, e)
+
     def worker_dispatch(self, op, req):
         """One job against BlueZ.  Runs on the worker thread, may block."""
         bz = self.worker_bluez
@@ -972,7 +1045,14 @@ class Server:
             return {}
 
         if op == "services":
-            return {"services": bz.services(addr)}
+            out = bz.services(addr)
+            if not out:
+                # An empty tree on a paired device is BlueZ trusting a
+                # resolved-but-empty cache; the lift (worker-side) makes the
+                # NEXT walk of this sensor discover for real.  This reply
+                # still leaves right now.
+                self.maybe_rebuild_gatt(bz, addr)
+            return {"services": out}
 
         if op == "chars":
             chars = bz.characteristics(addr, (req.get("service") or "").lower())

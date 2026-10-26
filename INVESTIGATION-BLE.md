@@ -440,3 +440,46 @@ and the BPM come back at 1 Hz (98/98/98/95 at 22:41).
 The next cold boot should not have to go through this again. If a deviation
 reappears, the traces of `session.log` will name the exact link in the
 chain.
+
+### 8.8 Four days later — the empty cache came back, so the helper now heals itself
+
+It did reappear, and here is the shape it took. During a ride, the bridge
+connected again and again (paired, bonded, trusted), and `services`
+answered `[]` — twice, on two separate selections, while the Tacx enjoyed
+its usual self-reconnect. The machine-side evidence ranked high enough not
+to doubt: the device object under `org.bluez` carried nothing but local
+audio endpoints (no `service00XX` at all), the record's UUID list held the
+classic profiles only, and the journal showed zero GATT discovery activity
+since the previous session.
+
+The trap is the one "resolved with nothing": on some earlier session the
+bridge had been connected while its heart-rate side was not serving (the
+app on the phone had gone to sleep; an app-hosted GATT tree dies with the
+app). BlueZ minted an empty cache, marked the services resolved, and from
+then on trusted that emptiness over every later link — no rediscovery on
+connect, none on reconnect, `[]` forever. The repair experienced on the
+spot: remove the record, let the game's next tap select the bridge, accept
+the one prompt on the phone — the discovery ran from zero, the cache was
+written for real (`180d`/`180f` in the record, BPM back at 1 Hz at 18:55).
+
+Answers worth keeping, though, because the incident graduated into code in
+the same hour:
+
+- **an empty `services` on a paired device is now diagnosed and healed**:
+  the helper's worker, on that shape, lifts the record
+  (`Adapter1.RemoveDevice` — the only lever that forces BlueZ to
+  rediscover), and re-connects through the pairing agent, so the SMP half
+  flows and the phone asks its owner to confirm once. No terminal ever
+  needs to be involved again.
+- **the walk that found the emptiness is never delayed**: it still
+  receives its honest `[]` immediately, and the NEXT walk of that sensor —
+  the user's next tap, the same gesture they make anyway — serves the
+  rebuilt tree. Bounded: at most one extra tap, never a freeze.
+- **a rate gap (90 s) fences the heal**, so a phone that is genuinely
+  asleep cannot walk into a remove-and-repair loop and lose its bond for
+  nothing every tap; a record whose rebuild stalled at "not on the air"
+  stays lifted, and a later tap pairs again on the way in.
+
+The helper-side rule set is small on purpose: one constant, one method, one
+dispatch hook — and it reads like the incident's trace.
+
