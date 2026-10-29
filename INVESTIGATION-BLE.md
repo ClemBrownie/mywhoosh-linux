@@ -478,7 +478,10 @@ the same hour:
 - **a rate gap (90 s) fences the heal**, so a phone that is genuinely
   asleep cannot walk into a remove-and-repair loop and lose its bond for
   nothing every tap; a record whose rebuild stalled at "not on the air"
-  stays lifted, and a later tap pairs again on the way in.
+  stays lifted, and the helper pairs on sight of the bridge's return --
+  opening the phone app is the user's whole part then, the prompt is the
+  only thing left to tap, and a later tap of the sensor pairs the same
+  way if the bridge never came inside the watch window.
 
 The helper-side rule set is small on purpose: one constant, one method, one
 dispatch hook — and it reads like the incident's trace.

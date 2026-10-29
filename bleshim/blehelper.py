@@ -990,8 +990,10 @@ class Server:
         already answered its caller honestly before reaching here, and the
         NEXT walk of this address sees the rebuilt tree.  One rebuild per
         address per GATT_REBUILD_GAP keeps a sleeping phone from losing its
-        bond in a tap-loop; a rebuild that stopped at "not on the air"
-        leaves the record lifted and a later tap pairs anyway.
+        bond in a tap-loop; a rebuild that stopped at "not on the air" leaves
+        the record lifted and then watches for its bridge, so the re-pairing
+        runs the moment the phone app wakes -- no cache command by hand, no
+        extra tap in the game, only the prompt to accept.
         """
         with self.gatt_heal_lock:
             now = time.monotonic()
@@ -1020,8 +1022,29 @@ class Server:
                 log("%s: re-paired as %r but the tree came up empty again -- "
                     "the bridge side is not serving yet", addr, name)
         except (BleError, dbus.DBusException) as e:
-            log("%s: no rebuild yet (%s); the record stays lifted, a later "
-                "walk of this sensor re-pairs", addr, e)
+            log("%s: no rebuild yet (%s); the record stays lifted and this "
+                "watch pairs on sight of its bridge", addr, e)
+            # The usual miss: the bridge is asleep (the phone app closed, iOS
+            # suspended it).  The record is already lifted, so nothing about
+            # the cache stays rotten -- the only thing left to do is pair,
+            # and the pairing prompt is the phone's to answer.  Watch for the
+            # bridge's return and carry the whole second half then, so that
+            # opening the phone app is the user's whole part: they accept the
+            # prompt, the tree rebuilds, the next walk serves it.  Bounded by
+            # the same gap that rate-limits repeats, so a bridge that never
+            # comes cannot hold the worker longer than its own window, and a
+            # later walk of this sensor re-pairs the same way.
+            if not bz.on_air(addr) and bz.wait_for_advert(addr, GATT_REBUILD_GAP,
+                                                          getattr(bz, "host", None)):
+                try:
+                    name = bz.connect(addr)
+                    count = len(bz.services(addr))
+                    log("%s: the bridge returned -- re-paired as %r, %d "
+                        "service(s) discovered; the next walk serves the tree",
+                        addr, name, count)
+                except (BleError, dbus.DBusException) as e2:
+                    log("%s: re-pair on its return refused (%s); a later walk "
+                        "of this sensor re-pairs", addr, e2)
 
     def worker_dispatch(self, op, req):
         """One job against BlueZ.  Runs on the worker thread, may block."""
