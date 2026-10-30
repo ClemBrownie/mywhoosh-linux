@@ -383,7 +383,7 @@ class Bluez:
         phone asks its owner to confirm once.  Real protocol, the only one
         that is honest about this trap.
         """
-        self.adapter().RemoveDevice(self.device_path(addr))
+        self.adapter().RemoveDevice(dbus.ObjectPath(self.device_path(addr)))
         log("%s: record removed -- the next connect re-pairs and rediscovers", addr)
 
     # ----------------------------------------------------------------- gatt
