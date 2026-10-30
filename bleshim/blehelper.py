@@ -1288,7 +1288,16 @@ class Server:
                    "uuids": uuids,
                    "rssi": int(props.get("RSSI", 0))})
 
-    def on_properties_changed(self, iface, changed, invalidated, path=None):
+    def on_properties_changed(self, iface, changed, invalidated=None, path=None):
+        if invalidated is None:
+            # Never seen from BlueZ, whose PropertiesChanged always carries
+            # the third argument -- but a 2026-10-30 session had a two-
+            # argument PropertiesChanged land here and crash the handler:
+            # dbus-python calls it straight, a positional shortfall is a
+            # TypeError in the loop's signal dispatch, and for the char
+            # event that carries the heart rate that would strand every
+            # later subscription.  Name it and carry on.
+            trace("PropertiesChanged on %s %s: no invalidated list", path, iface)
         if iface == CHAR_IFACE and "Value" in changed:
             with self.meta_lock:
                 known = self.char_addr.get(path)
